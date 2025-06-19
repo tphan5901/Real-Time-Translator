@@ -433,6 +433,9 @@ class TranslatorApp:
                     {"role": "user", "content": text}
                 ]
                 translation = ask_deepseek(messages)
+                if "ですか" in text and "?" not in translation:
+                    translation = translation.replace(".", "?")
+                return translation
                 return translation
             except Exception as e:
                 return f"[ERROR] Translation failed: {e}"
@@ -444,6 +447,8 @@ class TranslatorApp:
                 {"role": "user", "content": text}
             ]
             translation = ask_deepseek(messages)
+            if "ですか" in text and "?" not in translation:
+                translation = translation.replace(".", "?")
             return translation
         except Exception as e:
             return f"[ERROR] Translation failed: {e}"
