@@ -1,25 +1,25 @@
+import os
 import tkinter as tk
 import sounddevice as sd
 import numpy as np
 import threading
 import wave
 import speech_recognition as sr
-import requests
-import subprocess
-import psutil
 import pykakasi
-import whisper
+import whisper #\base whisper model: time(3.5 - 4secs)
+#from faster_whisper import WhisperModel
 import soundcard as sc
 from tkinter import filedialog
 from PIL import Image, ImageTk
 import concurrent.futures
+from queue import Queue
+import concurrent.futures
+from deepseek import *
 
 AUDIO_FILENAME = "temp_audio.wav"
 SAMPLERATE = 44100
 CHANNELS = 2
-MAX_WORKERS = 4
-OLLAMA_PATH = r"C:\Users\Admin\AppData\Local\Programs\Ollama\ollama.exe"
-ollama_proc = None
+MAX_WORKERS = 8
 
 # List all input devices
 #print(sd.query_devices())
@@ -32,47 +32,18 @@ for i, dev in enumerate(sd.query_devices()):
         print(f"Found VB Cable Input at index {vb_device_index}")
         break
 
-#start background process
-def start_ollama():
-    global ollama_proc
-    try:
-        ollama_proc = subprocess.Popen(
-            [OLLAMA_PATH, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW
-        )
-        print("Ollama started!")
-    except Exception as e:
-        print(f"[ERROR] Failed to start Ollama: {e}")
-
-def stop_ollama():
-    for proc in psutil.process_iter(["pid", "name"]):
-        try:
-            if proc.info["name"] == "ollama.exe":
-                print("Terminating ollama.exe...")
-                proc.terminate()
-                proc.wait(timeout=5)
-                print("[INFO] ollama.exe terminated.")
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired) as e:
-            print(f"[WARNING] Could not terminate process: {e}")
-
-def ask_deepseek(messages, model="deepseek-llm:7b"): #deepseek-r1:1.5b
-    response = requests.post(
-        "http://localhost:11434/api/chat",
-        json={
-            "model": model,
-            "messages": messages,
-            "stream": False
-        }
-    )
-    return response.json()["message"]["content"]
-
 class TranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Real Time Two Way Translator")
+        self.root.title("Two Way Translator")
         self.recording = False
+        self.audio_queue = Queue(maxsize = 20)
+
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+        # Start workers
+        for _ in range(MAX_WORKERS):
+            self.executor.submit(self.audio_worker)
 
         # Create main frame that will contain canvas and widgets
         self.main_frame = tk.Frame(root)
@@ -203,6 +174,15 @@ class TranslatorApp:
         self.output_textbox.insert(tk.END, "Translation results will appear here")
         self.output_textbox.config(state='disabled') 
 
+    def audio_worker(self):
+        while True:
+            try: 
+                chunk = self.audio_queue.get()
+                if chunk is None:
+                    break
+                self.process_chunk(chunk)
+            except Exception as e:
+                print(f"Error: Worker failed: {e}")
 
     def on_resize(self, event):
         if self.bg_image:
@@ -267,18 +247,22 @@ class TranslatorApp:
                     audio_chunk = stream.read(int(SAMPLERATE * 5))[0]  # 5 seconds
                     self.vb_frames.append(audio_chunk)
 
+                    if not self.audio_queue.full():
+                        self.audio_queue.put(audio_chunk.copy())
+                    else:
+                        print("Warning: Audio queue is full. Dropping Chunk")
                     # Save WAV
-                    combined = np.concatenate(self.vb_frames, axis=0)
-                    wf = wave.open(AUDIO_FILENAME, 'wb')
-                    wf.setnchannels(CHANNELS)
-                    wf.setsampwidth(2)
-                    wf.setframerate(SAMPLERATE)
-                    wf.writeframes(combined.tobytes())
-                    wf.close()
+                 #   combined = np.concatenate(self.vb_frames, axis=0)
+                 #   wf = wave.open(AUDIO_FILENAME, 'wb')
+                 #   wf.setnchannels(CHANNELS)
+                 #   wf.setsampwidth(2)
+                 #   wf.setframerate(SAMPLERATE)
+                 #   wf.writeframes(combined.tobytes())
+                 #   wf.close()
 
                     # Transcribe + Translate
-                    self.process_system_audio()
-                    self.vb_frames = []  # Clear buffer
+                #    self.process_system_audio()
+                #    self.vb_frames = []  # Clear buffer
         except Exception as e:
             print(f"[ERROR] VB-Cable stream failed: {e}")
 
@@ -316,7 +300,6 @@ class TranslatorApp:
 
             except Exception as e:
                 self.label.config(text=f"[ERROR] Failed to start system stream: {e}")
-
         else:
             # Disable system audio recording
             try:
@@ -349,6 +332,7 @@ class TranslatorApp:
         self.label.config(text="Transcribing...")
         #when we stop recording audio, start processing audio on seperate thread
         threading.Thread(target=self.process_audio).start()
+
 
     def convert_to_romaji(self, japanese_text):
         """Convert Japanese text to spaced Romaji"""
@@ -384,6 +368,7 @@ class TranslatorApp:
             self.frames.append(indata.copy())
            # print("Audio captured (shape:", indata.shape, ") First 5 samples:", indata[:5])
 
+    #saves audio to temp_audio
     def save_audio(self):
         audio = np.concatenate(self.frames, axis=0)
         wf = wave.open(AUDIO_FILENAME, 'wb')
@@ -393,7 +378,7 @@ class TranslatorApp:
         wf.writeframes(audio.tobytes())
         wf.close()
 
-    #whisper ai to translate mic input to japanese text
+    #whisper ai to transcribes recorded mic input device to text
     def process_audio(self):
         try:
             model = whisper.load_model("tiny.en")  # or "tiny.en" for speed or base which is slower
@@ -409,7 +394,8 @@ class TranslatorApp:
 
         romaji = self.convert_to_romaji(japanese_text)
         self.root.after(0, self.update_output, english_text, japanese_text, romaji)
-
+        
+    #use whisper to transcribe text format from selected playback device on targeted languages 
     def process_system_audio(self):
         try:
             model = whisper.load_model("tiny.en") #tiny.en or base
@@ -426,24 +412,10 @@ class TranslatorApp:
         romaji = self.convert_to_romaji(japanese_text) if not japanese_text.startswith("[ERROR]") else ""
         self.root.after(0, self.update_output, english_text, japanese_text, romaji)
 
-    def translate_with_deepseek(self, text):
-            try:
-                messages = [
-                    {"role": "system", "content": "You are a translation tool. Translate the following English text to Japanese without conversationally replying back to the text"},
-                    {"role": "user", "content": text}
-                ]
-                translation = ask_deepseek(messages)
-                if "ですか" in text and "?" not in translation:
-                    translation = translation.replace(".", "?")
-                return translation
-                return translation
-            except Exception as e:
-                return f"[ERROR] Translation failed: {e}"
-
     def translate_japanese_to_english(self, text):
         try:
-            messages = [
-                {"role": "system", "content": "You are a translation tool. Translate the following Japanese text to English Romanji reading without conversationally replying back to the text."},
+            messages = [ 
+                {"role": "system", "content": "You are a translation tool. Translate the following Japanese text to English Romanji reading without conversationally replying back to the text."}, #assistant
                 {"role": "user", "content": text}
             ]
             translation = ask_deepseek(messages)
@@ -474,14 +446,17 @@ class TranslatorApp:
 
 if __name__ == "__main__":
     start_ollama() 
-    
     root = tk.Tk()
     app = TranslatorApp(root)
+ 
  
     def on_closing():
         app.vb_recording = False
         stop_ollama()  
-        root.destroy()
+        for _ in range(MAX_WORKERS):
+            app.audio_queue.put(None)
+        app.executor.shutdown(wait=True)
+        os._exit(0)
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
